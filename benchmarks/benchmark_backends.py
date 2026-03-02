@@ -8,10 +8,11 @@ Usage
 
 Options
 -------
-    --n_samples INT       Number of samples (default: 200)
-    --n_features INT      Number of features (default: 100)
-    --n_targets INT       Number of targets (default: 50)
-    --n_alphas INT        Number of alpha values (default: 5)
+    --n_samples INT       Number of samples (default: 3000)
+    --n_features INT      Number of features (default: 1000)
+    --n_targets INT       Number of targets (default: 30000)
+    --n_alphas INT        Number of alpha values (default: 20)
+    --alpha_max FLOAT     Upper bound for logspace alphas (default: 20)
     --cv INT              Number of CV folds (default: 3)
     --n_iter INT          Random-search iterations for MKR (default: 5)
     --n_repetitions INT   Repetitions per benchmark (default: 10)
@@ -20,6 +21,7 @@ Options
                           (default: auto-detect available)
     --output_dir DIR      Directory for result files (default: benchmark_results)
     --float64             Use float64 input instead of the default float32
+    --fast                Use small dimensions for a quick smoke test
 
 The script generates (datetime-stamped so successive runs don't overwrite):
     <output_dir>/benchmark_<YYYYMMDD_HHMMSS>.json   Full results with metadata
@@ -269,7 +271,7 @@ MODEL_RUNNERS = {
 def run_benchmarks(args):
     rng = np.random.RandomState(args.seed)
 
-    # Generate synthetic data once (float64 by default, float32 if requested)
+    # Generate synthetic data once (float32 by default, float64 if requested)
     dtype = np.float64 if args.float64 else np.float32
     X = rng.randn(args.n_samples, args.n_features).astype(dtype)
     # Create targets with a real linear relationship + noise so models
@@ -281,7 +283,7 @@ def run_benchmarks(args):
     X_train, X_test = X[:split], X[split:]
     Y_train, Y_test = Y[:split], Y[split:]
 
-    alphas = np.logspace(-3, 3, args.n_alphas, dtype=dtype).tolist()
+    alphas = np.logspace(-3, args.alpha_max, args.n_alphas, dtype=dtype).tolist()
 
     backends = args.backends
     print(f"Backends to benchmark: {backends}")
@@ -442,6 +444,7 @@ def write_json(results, system_info, args, path):
             "n_features": args.n_features,
             "n_targets": args.n_targets,
             "n_alphas": args.n_alphas,
+            "alpha_max": args.alpha_max,
             "cv": args.cv,
             "n_iter": args.n_iter,
             "n_repetitions": args.n_repetitions,
@@ -572,10 +575,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Benchmark himalaya backends for speed and correctness."
     )
-    parser.add_argument("--n_samples", type=int, default=200)
-    parser.add_argument("--n_features", type=int, default=100)
-    parser.add_argument("--n_targets", type=int, default=50)
-    parser.add_argument("--n_alphas", type=int, default=5)
+    parser.add_argument("--n_samples", type=int, default=3000)
+    parser.add_argument("--n_features", type=int, default=1000)
+    parser.add_argument("--n_targets", type=int, default=30000)
+    parser.add_argument("--n_alphas", type=int, default=20)
+    parser.add_argument("--alpha_max", type=float, default=20,
+                        help="Upper bound for logspace alphas (default: 20).")
     parser.add_argument("--cv", type=int, default=3)
     parser.add_argument("--n_iter", type=int, default=5)
     parser.add_argument("--n_repetitions", type=int, default=10)
@@ -592,7 +597,24 @@ def main():
         "--float64", action="store_true",
         help="Use float64 input instead of the default float32.",
     )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Quick smoke test with small dimensions "
+        "(n_samples=200, n_features=100, n_targets=50, n_alphas=5, "
+        "n_repetitions=3).",
+    )
     args = parser.parse_args()
+
+    # --fast overrides dimension/repetition defaults (but not explicit flags)
+    if args.fast:
+        fast_defaults = {
+            "n_samples": 200, "n_features": 100, "n_targets": 50,
+            "n_alphas": 5, "alpha_max": 3, "n_repetitions": 3,
+        }
+        for key, val in fast_defaults.items():
+            # Only override if the user didn't explicitly set the flag
+            if f"--{key}" not in sys.argv:
+                setattr(args, key, val)
 
     # Resolve backends
     if args.backends is None:
