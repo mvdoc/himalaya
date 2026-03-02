@@ -492,6 +492,55 @@ def write_csv(results, path):
     print(f"CSV results written to {path}")
 
 
+def print_summary_table(results):
+    """Print a Markdown summary table to stdout."""
+    # Column definitions: (header, key, format_func)
+    columns = [
+        ("Model", "model", str),
+        ("Backend", "backend", str),
+        ("Status", "status", str),
+        ("Fit (mean)", "fit_time_mean", lambda v: f"{v:.4f}s" if v is not None else "-"),
+        ("Fit (std)", "fit_time_std", lambda v: f"{v:.4f}s" if v is not None else "-"),
+        ("Predict (mean)", "predict_time_mean",
+         lambda v: f"{v:.4f}s" if v is not None else "-"),
+        ("Predict (std)", "predict_time_std",
+         lambda v: f"{v:.4f}s" if v is not None else "-"),
+        ("vs Ref", "reference_backend", lambda v: v if v else "-"),
+        ("Max |diff|", "predictions_max_abs_diff",
+         lambda v: f"{v:.2e}" if v is not None else "-"),
+        ("Correlation", "predictions_correlation",
+         lambda v: f"{v:.8f}" if v is not None else "-"),
+    ]
+
+    headers = [c[0] for c in columns]
+    # Build rows
+    rows = []
+    for rec in results:
+        row = []
+        for _, key, fmt in columns:
+            row.append(fmt(rec.get(key)))
+        rows.append(row)
+
+    # Compute column widths
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    # Print table
+    def fmt_row(cells):
+        return "| " + " | ".join(c.ljust(w) for c, w in zip(cells, widths)) + " |"
+
+    sep = "|" + "|".join("-" * (w + 2) for w in widths) + "|"
+
+    print()
+    print(fmt_row(headers))
+    print(sep)
+    for row in rows:
+        print(fmt_row(row))
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark himalaya backends for speed and correctness."
@@ -541,7 +590,10 @@ def main():
     write_json(results, system_info, args, json_path)
     write_csv(results, csv_path)
 
-    print("\nDone.")
+    # Print markdown summary table
+    print_summary_table(results)
+
+    print("Done.")
 
 
 if __name__ == "__main__":
