@@ -21,9 +21,9 @@ Options
     --output_dir DIR      Directory for result files (default: benchmark_results)
     --float32             Force float32 input for all backends
 
-The script generates:
-    <output_dir>/benchmark_results.json   Full results with metadata
-    <output_dir>/benchmark_results.csv    Flat table for quick comparison
+The script generates (datetime-stamped so successive runs don't overwrite):
+    <output_dir>/benchmark_<YYYYMMDD_HHMMSS>.json   Full results with metadata
+    <output_dir>/benchmark_<YYYYMMDD_HHMMSS>.csv    Flat table for quick comparison
 """
 import argparse
 import json
@@ -533,10 +533,11 @@ def main():
     # Run benchmarks
     results = run_benchmarks(args)
 
-    # Write output
+    # Write output with datetime stamp so successive runs don't overwrite
     os.makedirs(args.output_dir, exist_ok=True)
-    json_path = os.path.join(args.output_dir, "benchmark_results.json")
-    csv_path = os.path.join(args.output_dir, "benchmark_results.csv")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = os.path.join(args.output_dir, f"benchmark_{stamp}.json")
+    csv_path = os.path.join(args.output_dir, f"benchmark_{stamp}.csv")
     write_json(results, system_info, args, json_path)
     write_csv(results, csv_path)
 
