@@ -281,7 +281,7 @@ def run_benchmarks(args):
     X_train, X_test = X[:split], X[split:]
     Y_train, Y_test = Y[:split], Y[split:]
 
-    alphas = np.logspace(-3, 3, args.n_alphas).tolist()
+    alphas = np.logspace(-3, 3, args.n_alphas, dtype=dtype).tolist()
 
     backends = args.backends
     print(f"Backends to benchmark: {backends}")
