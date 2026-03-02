@@ -14,12 +14,12 @@ Options
     --n_alphas INT        Number of alpha values (default: 5)
     --cv INT              Number of CV folds (default: 3)
     --n_iter INT          Random-search iterations for MKR (default: 5)
-    --n_repetitions INT   Repetitions per benchmark (default: 3)
+    --n_repetitions INT   Repetitions per benchmark (default: 10)
     --seed INT            Random seed (default: 42)
     --backends STR,...     Comma-separated list of backends to test
                           (default: auto-detect available)
     --output_dir DIR      Directory for result files (default: benchmark_results)
-    --float32             Force float32 input for all backends
+    --float64             Use float64 input instead of the default float32
 
 The script generates (datetime-stamped so successive runs don't overwrite):
     <output_dir>/benchmark_<YYYYMMDD_HHMMSS>.json   Full results with metadata
@@ -270,7 +270,7 @@ def run_benchmarks(args):
     rng = np.random.RandomState(args.seed)
 
     # Generate synthetic data once (float64 by default, float32 if requested)
-    dtype = np.float32 if args.float32 else np.float64
+    dtype = np.float64 if args.float64 else np.float32
     X = rng.randn(args.n_samples, args.n_features).astype(dtype)
     # Create targets with a real linear relationship + noise so models
     # produce meaningful results
@@ -446,7 +446,7 @@ def write_json(results, system_info, args, path):
             "n_iter": args.n_iter,
             "n_repetitions": args.n_repetitions,
             "seed": args.seed,
-            "float32": args.float32,
+            "float64": args.float64,
             "backends": args.backends,
         },
         "results": results,
@@ -494,32 +494,56 @@ def write_csv(results, path):
 
 def print_summary_table(results):
     """Print a Markdown summary table to stdout."""
-    # Column definitions: (header, key, format_func)
+    # Build a lookup for reference fit/predict times per model so we can
+    # compute time multipliers.  The reference backend is the first backend
+    # tested for each model (reference_backend is None for that row).
+    ref_times = {}  # model -> (fit_time_mean, predict_time_mean)
+    for rec in results:
+        if rec.get("reference_backend") is None and rec.get("status") == "ok":
+            ref_times[rec["model"]] = (
+                rec["fit_time_mean"],
+                rec["predict_time_mean"],
+            )
+
+    def _speedup(rec, time_key):
+        """Return speedup string like '1.00x' or '0.52x' vs reference."""
+        ref = ref_times.get(rec.get("model"))
+        if ref is None:
+            return "-"
+        idx = 0 if time_key == "fit_time_mean" else 1
+        ref_t = ref[idx]
+        cur_t = rec.get(time_key)
+        if ref_t is None or cur_t is None or ref_t == 0:
+            return "-"
+        return f"{cur_t / ref_t:.2f}x"
+
+    # Column definitions: (header, value_func)
     columns = [
-        ("Model", "model", str),
-        ("Backend", "backend", str),
-        ("Status", "status", str),
-        ("Fit (mean)", "fit_time_mean", lambda v: f"{v:.4f}s" if v is not None else "-"),
-        ("Fit (std)", "fit_time_std", lambda v: f"{v:.4f}s" if v is not None else "-"),
-        ("Predict (mean)", "predict_time_mean",
-         lambda v: f"{v:.4f}s" if v is not None else "-"),
-        ("Predict (std)", "predict_time_std",
-         lambda v: f"{v:.4f}s" if v is not None else "-"),
-        ("vs Ref", "reference_backend", lambda v: v if v else "-"),
-        ("Max |diff|", "predictions_max_abs_diff",
-         lambda v: f"{v:.2e}" if v is not None else "-"),
-        ("Correlation", "predictions_correlation",
-         lambda v: f"{v:.8f}" if v is not None else "-"),
+        ("Model", lambda r: str(r.get("model", ""))),
+        ("Backend", lambda r: str(r.get("backend", ""))),
+        ("Status", lambda r: str(r.get("status", ""))),
+        ("Fit (mean)", lambda r: f"{r['fit_time_mean']:.4f}s"
+         if r.get("fit_time_mean") is not None else "-"),
+        ("Fit (std)", lambda r: f"{r['fit_time_std']:.4f}s"
+         if r.get("fit_time_std") is not None else "-"),
+        ("Fit (x ref)", lambda r: _speedup(r, "fit_time_mean")),
+        ("Predict (mean)", lambda r: f"{r['predict_time_mean']:.4f}s"
+         if r.get("predict_time_mean") is not None else "-"),
+        ("Predict (std)", lambda r: f"{r['predict_time_std']:.4f}s"
+         if r.get("predict_time_std") is not None else "-"),
+        ("Predict (x ref)", lambda r: _speedup(r, "predict_time_mean")),
+        ("vs Ref", lambda r: r.get("reference_backend") or "-"),
+        ("Max |diff|", lambda r: f"{r['predictions_max_abs_diff']:.2e}"
+         if r.get("predictions_max_abs_diff") is not None else "-"),
+        ("Correlation", lambda r: f"{r['predictions_correlation']:.8f}"
+         if r.get("predictions_correlation") is not None else "-"),
     ]
 
     headers = [c[0] for c in columns]
     # Build rows
     rows = []
     for rec in results:
-        row = []
-        for _, key, fmt in columns:
-            row.append(fmt(rec.get(key)))
-        rows.append(row)
+        rows.append([fmt(rec) for _, fmt in columns])
 
     # Compute column widths
     widths = [len(h) for h in headers]
@@ -551,7 +575,7 @@ def main():
     parser.add_argument("--n_alphas", type=int, default=5)
     parser.add_argument("--cv", type=int, default=3)
     parser.add_argument("--n_iter", type=int, default=5)
-    parser.add_argument("--n_repetitions", type=int, default=3)
+    parser.add_argument("--n_repetitions", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--backends",
@@ -562,7 +586,8 @@ def main():
     )
     parser.add_argument("--output_dir", type=str, default="benchmark_results")
     parser.add_argument(
-        "--float32", action="store_true", help="Force float32 input for all backends."
+        "--float64", action="store_true",
+        help="Use float64 input instead of the default float32.",
     )
     args = parser.parse_args()
 
