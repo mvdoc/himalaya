@@ -506,16 +506,19 @@ def print_summary_table(results):
             )
 
     def _speedup(rec, time_key):
-        """Return speedup string like '1.00x' or '0.52x' vs reference."""
+        """Return speedup string like '1.00x' or '2.00x' vs reference.
+
+        Values > 1 mean faster than reference, < 1 mean slower.
+        """
         ref = ref_times.get(rec.get("model"))
         if ref is None:
             return "-"
         idx = 0 if time_key == "fit_time_mean" else 1
         ref_t = ref[idx]
         cur_t = rec.get(time_key)
-        if ref_t is None or cur_t is None or ref_t == 0:
+        if ref_t is None or cur_t is None or cur_t == 0:
             return "-"
-        return f"{cur_t / ref_t:.2f}x"
+        return f"{ref_t / cur_t:.2f}x"
 
     # Column definitions: (header, value_func)
     columns = [
