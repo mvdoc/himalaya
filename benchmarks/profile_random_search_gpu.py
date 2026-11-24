@@ -10,7 +10,11 @@ check that the script itself works).
 Usage
 -----
     python benchmarks/profile_random_search_gpu.py \
-        --n_samples 3000 --n_targets 50000 --n_kernels 4 --n_iter 10
+        --n_samples 3000 --n_targets 80000 --n_kernels 4 --n_iter 10 \
+        --n_targets_batch 20000
+
+Add ``--Y_in_cpu`` to keep the targets on CPU as with large datasets; the
+breakdown then shows the time spent copying them to the GPU ("to_gpu").
 
 Sections
 --------
@@ -247,7 +251,10 @@ def section_solver(backend, Ks, Y, alphas, args):
     params = dict(n_iter=args.n_iter, alphas=alphas, cv=args.cv,
                   return_weights="dual", random_state=0, progress_bar=False,
                   n_targets_batch=args.n_targets_batch,
-                  n_alphas_batch=args.n_alphas_batch)
+                  n_alphas_batch=args.n_alphas_batch,
+                  Y_in_cpu=args.Y_in_cpu)
+    if args.Y_in_cpu:
+        Y = Y.cpu()
 
     def run(**kwargs):
         return solve_multiple_kernel_ridge_random_search(
@@ -272,6 +279,8 @@ def section_solver(backend, Ks, Y, alphas, args):
                     timer.wrap("matmul", backend.matmul)), \
             patched(backend, "to_cpu",
                     timer.wrap("to_cpu", backend.to_cpu)), \
+            patched(backend, "to_gpu",
+                    timer.wrap("to_gpu", backend.to_gpu)), \
             patched(random_search_module, "_refit_dual_weights",
                     timer.wrap("refit (total)",
                                random_search_module._refit_dual_weights)):
@@ -312,14 +321,16 @@ def main():
     parser.add_argument("--backend", default=None,
                         help="torch_cuda (default if available) or torch")
     parser.add_argument("--n_samples", type=int, default=3000)
-    parser.add_argument("--n_targets", type=int, default=50000)
+    parser.add_argument("--n_targets", type=int, default=80000)
     parser.add_argument("--n_kernels", type=int, default=4)
-    parser.add_argument("--n_alphas", type=int, default=20)
+    parser.add_argument("--n_alphas", type=int, default=25)
     parser.add_argument("--n_iter", type=int, default=10)
     parser.add_argument("--cv", type=int, default=5)
     parser.add_argument("--n_targets_batch", type=int, default=None)
     parser.add_argument("--n_alphas_batch", type=int, default=None)
     parser.add_argument("--float64", action="store_true")
+    parser.add_argument("--Y_in_cpu", action="store_true",
+                        help="keep Y on CPU in the solver (section 5)")
     parser.add_argument("--sections", default="1,2,3,4,5")
     args = parser.parse_args()
 
