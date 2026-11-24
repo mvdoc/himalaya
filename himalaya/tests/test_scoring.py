@@ -1,3 +1,6 @@
+import warnings
+
+import numpy as np
 import pytest
 import sklearn.metrics
 
@@ -11,6 +14,7 @@ from himalaya.scoring import correlation_score
 from himalaya.scoring import r2_score_split
 from himalaya.scoring import r2_score_split_svd
 from himalaya.scoring import correlation_score_split
+from himalaya.scoring import _check_finite
 
 
 def _create_data(backend, dtype_str):
@@ -188,6 +192,22 @@ def test_infinite_and_nans(backend, dtype_str, scoring):
     assert not backend.any(backend.isnan(s_2))
     assert len(record) == 1
     assert record[0].message.args[0] == "inf in y_pred."
+
+
+@pytest.mark.parametrize('dtype_str', ["float32", "float64"])
+@pytest.mark.parametrize('backend', ALL_BACKENDS)
+def test_check_finite_overflowing_sum(backend, dtype_str):
+    # Finite values whose sum overflows should be left untouched, without
+    # any warning.
+    backend = set_backend(backend)
+    y_pred, _ = _create_data(backend, dtype_str)
+    y_pred[:] = float(np.finfo(dtype_str).max)
+    expected = backend.copy(y_pred)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        y_pred = _check_finite(y_pred)
+    assert_array_almost_equal(y_pred / expected, backend.ones_like(expected))
 
 
 @pytest.mark.parametrize('dtype_str', ["float32", "float64"])

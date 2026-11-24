@@ -111,14 +111,12 @@ def solve_ridge_svd(X, Y, alpha=1., method="svd", fit_intercept=False,
     for start in range(0, n_targets, n_targets_batch):
         batch = slice(start, start + n_targets_batch)
 
-        iUT = _batch_or_skip(inverse, batch, 1)[:, None, :] * U.T[:, :, None]
-        iUT = backend.transpose(iUT, (2, 0, 1))
-        # iUT.shape = (1 or n_targets_batch, n_samples, n_samples)
+        # Solve in the eigenbasis, with one regularization per target:
+        # weights_batch = Vt.T @ (inverse * (U.T @ Y))
+        weights_batch = backend.matmul(U.T, Y[:, batch])
+        weights_batch *= _batch_or_skip(inverse, batch, 1)
+        weights_batch = backend.matmul(Vt.T, weights_batch)
 
-        if Y.shape[0] < Y.shape[1]:
-            weights_batch = ((Vt.T @ iUT) @ Y.T[batch, :, None])[:, :, 0].T
-        else:
-            weights_batch = Vt.T @ (iUT @ Y.T[batch, :, None])[:, :, 0].T
         weights[:, batch] = backend.to_cpu(weights_batch)
 
     if fit_intercept:

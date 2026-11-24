@@ -209,9 +209,9 @@ def solve_group_ridge_random_search(
             Xtrain, Xtest = X_[train], X_[test]
 
             if fit_intercept:
-                Xtrain_mean = X_[train].mean(0)
-                Xtrain = X_[train] - Xtrain_mean
-                Xtest = X_[test] - Xtrain_mean
+                Xtrain_mean = Xtrain.mean(0)
+                Xtrain = Xtrain - Xtrain_mean
+                Xtest = Xtest - Xtrain_mean
 
             # When Y stays on CPU, convert indices back to CPU to index it
             if Y_in_cpu:
@@ -220,12 +220,13 @@ def solve_group_ridge_random_search(
 
             for matrix, alpha_batch in _decompose_ridge(
                     Xtrain=Xtrain, alphas=alphas, negative_eigenvalues="nan",
-                    n_alphas_batch=n_alphas_batch, method=diagonalize_method):
-                # n_alphas_batch, n_features, n_samples_train = \
-                # matrix.shape
-                matrix = backend.matmul(Xtest, matrix)
+                    n_alphas_batch=n_alphas_batch, method=diagonalize_method,
+                    Xtest=Xtest):
                 # n_alphas_batch, n_samples_test, n_samples_train = \
                 # matrix.shape
+                # stack the alphas, to compute all predictions with a single
+                # 2D matrix product (faster than a batched 3D product)
+                matrix_2d = matrix.reshape(-1, matrix.shape[2])
 
                 predictions = None
                 for start in range(0, n_targets, n_targets_batch):
@@ -237,7 +238,8 @@ def solve_group_ridge_random_search(
                         Ytrain = Ytrain - Ytrain_mean
                         Ytest = Ytest - Ytrain_mean
 
-                    predictions = backend.matmul(matrix, Ytrain)
+                    predictions = backend.matmul(matrix_2d, Ytrain).reshape(
+                        matrix.shape[0], matrix.shape[1], Ytrain.shape[1])
                     # n_alphas_batch, n_samples_test, n_targets_batch = \
                     # predictions.shape
 
@@ -252,7 +254,7 @@ def solve_group_ridge_random_search(
                 too_small_alphas = backend.isnan(matrix[:, 0, 0])
                 scores[jj, alpha_batch, :][too_small_alphas] = -1e5
 
-                del matrix, predictions
+                del matrix, matrix_2d, predictions
             del train, test, Xtrain, Xtest
 
         # select best alphas
@@ -274,47 +276,10 @@ def solve_group_ridge_random_search(
                 update_indices = backend.to_cpu(update_indices)
             if len(update_indices) > 0:
 
-                # refit weights only for alphas used by at least one target
-                used_alphas = backend.unique(best_alphas[mask])
-                primal_weights = backend.zeros_like(
-                    X_, shape=(n_features, len(update_indices)), device="cpu")
-                for matrix, alpha_batch in _decompose_ridge(
-                        Xtrain=X_, alphas=used_alphas,
-                        negative_eigenvalues="zeros",
-                        n_alphas_batch=min(len(used_alphas), n_alphas_batch),
-                        method=diagonalize_method):
-
-                    for start in range(0, len(update_indices),
-                                       n_targets_batch_refit):
-                        batch = slice(start, start + n_targets_batch_refit)
-
-                        weights = backend.matmul(
-                            matrix,
-                            backend.to_gpu(Y[:, update_indices[batch]],
-                                           device=device))
-                        # used_n_alphas_batch, n_features, n_targets_batch = \
-                        # weights.shape
-
-                        # select alphas corresponding to best cv_score
-                        alphas_indices = backend.searchsorted(
-                            used_alphas, best_alphas[mask][batch])
-                        # mask targets whose selected alphas are outside the
-                        # alpha batch
-                        mask2 = backend.isin(
-                            alphas_indices,
-                            backend.arange(len(used_alphas))[alpha_batch])
-                        # get indices in alpha_batch
-                        alphas_indices = backend.searchsorted(
-                            backend.arange(len(used_alphas))[alpha_batch],
-                            alphas_indices[mask2])
-                        # update corresponding weights
-                        mask_target = backend.arange(weights.shape[2])
-                        mask_target = backend.to_gpu(mask_target)[mask2]
-                        tmp = weights[alphas_indices, :, mask_target]
-                        primal_weights[:, batch][:, backend.to_cpu(mask2)] = \
-                            backend.to_cpu(tmp).T
-                        del weights, alphas_indices, mask2, mask_target
-                    del matrix
+                primal_weights = _refit_primal_weights(
+                    X_, Y, update_indices, best_alphas[mask],
+                    n_targets_batch=n_targets_batch_refit,
+                    method=diagonalize_method, device=device)
 
                 # multiply again by np.sqrt(g), as we then want to use
                 # the primal weights on the unscaled features Xs, and not
@@ -343,7 +308,7 @@ def solve_group_ridge_random_search(
 
 
 def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
-                     negative_eigenvalues="zeros"):
+                     negative_eigenvalues="zeros", Xtest=None):
     """Precompute resolution matrices for ridge predictions.
 
     To compute the prediction::
@@ -354,7 +319,13 @@ def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
 
     this function precomputes::
 
-        matrices = (XTX + alphas * Id)^-1 @ Xtrain^T.
+        matrices = (XTX + alphas * Id)^-1 @ Xtrain^T,
+
+    or directly::
+
+        matrices = Xtest @ (XTX + alphas * Id)^-1 @ Xtrain^T
+
+    if Xtest is not None.
 
     Parameters
     ----------
@@ -373,11 +344,14 @@ def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
             - "zeros" replaces them with zeros.
             - "nan" returns nans if the regularization does not compensate
                 twice the smallest negative value, else it ignores the problem.
+    Xtest : array of shape (n_samples_test, n_features) or None
+        Testing features. If not None, the resolution matrices are directly
+        multiplied by Xtest, which is faster than multiplying them afterward.
 
     Returns
     -------
-    matrices : array of shape (n_alphas, n_samples_test, n_samples_train) or \
-        (n_alphas, n_features, n_samples_train) if test is not None
+    matrices : array of shape (n_alphas, n_features, n_samples_train) or \
+        (n_alphas, n_samples_test, n_samples_train) if Xtest is not None
         Precomputed resolution matrices.
     alpha_batch : slice
         Slice of the batch of alphas.
@@ -393,6 +367,11 @@ def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
         U, eigenvalues, Vt = backend.svd(Xtrain, full_matrices=False)
     else:
         raise ValueError("Unknown method=%r." % (method, ))
+
+    if Xtest is not None:
+        # Project Xtest on the right singular vectors once, to never compute
+        # the larger matrices of shape (n_alphas, n_features, n_samples_train)
+        Xtest_V = backend.matmul(Xtest, Vt.T)
 
     for start in range(0, len(alphas), n_alphas_batch):
         batch = slice(start, start + n_alphas_batch)
@@ -418,7 +397,11 @@ def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
                 raise ValueError("Unknown negative_eigenvalues=%r." %
                                  (negative_eigenvalues, ))
 
-        matrices = backend.matmul(Vt.T, ev_weighting[:, :, None] * U.T)
+        if Xtest is not None:
+            matrices = backend.matmul(
+                Xtest_V[None] * ev_weighting[:, None, :], U.T)
+        else:
+            matrices = backend.matmul(Vt.T, ev_weighting[:, :, None] * U.T)
 
         if use_alpha_batch:
             yield matrices, batch
@@ -426,6 +409,69 @@ def _decompose_ridge(Xtrain, alphas, n_alphas_batch=None, method="svd",
             return matrices, batch
 
         del matrices
+
+
+def _refit_primal_weights(X, Y, target_indices, alphas, n_targets_batch=None,
+                          method="svd", device=None):
+    """Solve ridge for a subset of targets, with one alpha per target.
+
+    Computes ``(X.T @ X + alphas[t] * Id)^-1 @ X.T @ Y[:, target_indices[t]]``
+    for each target ``t``. The features are decomposed only once, and each
+    target is solved in the singular basis with its own regularization, so the
+    cost does not depend on the number of different alphas.
+
+    Parameters
+    ----------
+    X : array of shape (n_samples, n_features)
+        Input features.
+    Y : array of shape (n_samples, n_targets)
+        Target data.
+    target_indices : array of shape (n_selected_targets, )
+        Indices of the targets to solve.
+    alphas : array of shape (n_selected_targets, )
+        Regularization parameter of each selected target.
+    n_targets_batch : int or None
+        Size of the batch for over targets. Used for memory reasons.
+        If None, uses all selected targets at once.
+    method : str in {"svd"}
+        Method used to diagonalize the features.
+    device : str or None
+        Device used for the computations.
+
+    Returns
+    -------
+    primal_weights : array of shape (n_features, n_selected_targets)
+        Ridge coefficients. Always stored on CPU memory.
+    """
+    backend = get_backend()
+
+    n_selected = len(target_indices)
+    if n_targets_batch is None:
+        n_targets_batch = n_selected
+
+    if method == "svd":
+        # SVD: X = U @ np.diag(eigenvalues) @ Vt
+        U, eigenvalues, Vt = backend.svd(X, full_matrices=False)
+    else:
+        raise ValueError("Unknown method=%r." % (method, ))
+
+    primal_weights = backend.zeros_like(X, shape=(X.shape[1], n_selected),
+                                        device="cpu")
+    for start in range(0, n_selected, n_targets_batch):
+        batch = slice(start, start + n_targets_batch)
+        Y_batch = backend.to_gpu(Y[:, target_indices[batch]], device=device)
+
+        # (XTX + alpha * Id)^-1 @ X.T @ Y
+        #     = Vt.T @ ((U.T @ Y) * eigenvalues / (eigenvalues ** 2 + alpha))
+        weights = backend.matmul(U.T, Y_batch)
+        weights *= eigenvalues[:, None] / (
+            (eigenvalues ** 2)[:, None] + alphas[batch][None, :])
+        weights = backend.matmul(Vt.T, weights)
+
+        primal_weights[:, batch] = backend.to_cpu(weights)
+        del Y_batch, weights
+
+    return primal_weights
 
 
 #: Dictionary with all group ridge solvers

@@ -13,6 +13,21 @@ except ImportError:
 ###############################################################################
 
 
+def _eigh(a):
+    """Eigendecomposition of a symmetric matrix.
+
+    With scipy, use the divide-and-conquer LAPACK driver ("evd"), which is
+    faster than scipy's default driver ("evr") when computing all eigenvalues
+    and eigenvectors. This is also the driver used by numpy and torch.
+    """
+    if use_scipy:
+        try:
+            return linalg.eigh(a, driver="evd")
+        except TypeError:  # scipy < 1.5 has no "driver" parameter
+            pass
+    return linalg.eigh(a)
+
+
 def apply_argmax(array, argmax, axis):
     """Apply precomputed argmax indices in multi dimension arrays
 
@@ -75,7 +90,7 @@ bool = np.bool_
 float32 = np.float32
 float64 = np.float64
 int32 = np.int32
-eigh = linalg.eigh
+eigh = _eigh
 norm = linalg.norm
 log = np.log
 exp = np.exp

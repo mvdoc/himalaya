@@ -1,5 +1,7 @@
 import warnings
 
+import numpy as np
+
 from .backend import get_backend
 
 
@@ -27,7 +29,9 @@ def l2_neg_loss(y_true, y_pred):
     axis = 1 if len(y_pred.shape) > len(y_true.shape) else 0
     n_samples = y_true.shape[0]
 
-    error = ((y_true - y_pred) ** 2).sum(axis)
+    error = y_true - y_pred
+    error *= error  # in-place square, to avoid a large temporary array
+    error = error.sum(axis)
     l2 = -error / n_samples
 
     return l2
@@ -56,7 +60,9 @@ def r2_score(y_true, y_pred):
     # broadcasting if y_pred has more dimensions
     axis = 1 if len(y_pred.shape) > len(y_true.shape) else 0
 
-    error = ((y_true - y_pred) ** 2).sum(axis)
+    error = y_true - y_pred
+    error *= error  # in-place square, to avoid a large temporary array
+    error = error.sum(axis)
     var = ((y_true - y_true.mean(0)) ** 2).sum(0)
     r2 = 1. - error / var
     if axis == 0:
@@ -330,6 +336,14 @@ def correlation_score_split(y_true, y_pred):
 
 def _check_finite(y_pred):
     backend = get_backend()
+
+    # Fast path: if the sum is finite, all values are finite. (The converse is
+    # not true, e.g. if the sum overflows, hence the full check below.)
+    with np.errstate(over="ignore", invalid="ignore"):
+        # (silence numpy warnings about overflowing or invalid sums)
+        total = y_pred.sum()
+    if not (backend.isnan(total) or backend.isinf(total)):
+        return y_pred
 
     is_nan = backend.isnan(y_pred)
     if backend.any(is_nan):
