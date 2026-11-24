@@ -204,11 +204,15 @@ def solve_multiple_kernel_ridge_random_search(
             bar(gammas, '%d random sampling with cv' % len(gammas),
                 use_it=progress_bar)):
 
+        # weighted sum of the kernels, computed as a matrix-vector product to
+        # avoid allocating a temporary array of the same size as Ks
+        Ks_2d = Ks.reshape(n_kernels, n_samples * n_samples)
         if Ks_in_cpu:
-            K = (backend.to_cpu(gamma[:, None, None]) * Ks).sum(0)
-            K = backend.to_gpu(K, device=device)
+            K = backend.matmul(backend.to_cpu(gamma), Ks_2d)
+            K = backend.to_gpu(K.reshape(n_samples, n_samples), device=device)
         else:
-            K = (gamma[:, None, None] * Ks).sum(0)
+            K = backend.matmul(gamma, Ks_2d).reshape(n_samples, n_samples)
+        del Ks_2d
 
         if jitter_alphas:
             noise = backend.asarray_like(random_generator.rand(), alphas)
@@ -231,6 +235,9 @@ def solve_multiple_kernel_ridge_random_search(
                     method=diagonalize_method):
                 # n_alphas_batch, n_samples_test, n_samples_train = \
                 # matrix.shape
+                # stack the alphas, to compute all predictions with a single
+                # 2D matrix product (faster than a batched 3D product)
+                matrix_2d = matrix.reshape(-1, matrix.shape[2])
 
                 for start in range(0, n_targets, n_targets_batch):
                     batch = slice(start, start + n_targets_batch)
@@ -242,7 +249,8 @@ def solve_multiple_kernel_ridge_random_search(
                         Ytrain = Ytrain - Ytrain_mean
                         Ytest = Ytest - Ytrain_mean
 
-                    predictions = backend.matmul(matrix, Ytrain)
+                    predictions = backend.matmul(matrix_2d, Ytrain).reshape(
+                        matrix.shape[0], matrix.shape[1], Ytrain.shape[1])
                     # n_alphas_batch, n_samples_test, n_targets_batch = \
                     # predictions.shape
 
@@ -256,7 +264,7 @@ def solve_multiple_kernel_ridge_random_search(
                 too_small_alphas = backend.isnan(matrix[:, 0, 0])
                 scores[jj, alpha_batch, :][too_small_alphas] = -1e5
 
-                del matrix, predictions
+                del matrix, matrix_2d, predictions
             del train, test
 
         # select best alphas
@@ -284,47 +292,10 @@ def solve_multiple_kernel_ridge_random_search(
                 update_indices = backend.to_cpu(update_indices)
             if len(update_indices) > 0:
 
-                # refit weights only for alphas used by at least one target
-                used_alphas = backend.unique(best_alphas[mask])
-                dual_weights = backend.zeros_like(
-                    K, shape=(n_samples, len(update_indices)), device="cpu")
-                for matrix, alpha_batch in _decompose_kernel_ridge(
-                        K, used_alphas, Ktest=None,
-                        negative_eigenvalues="zeros",
-                        n_alphas_batch=min(len(used_alphas), n_alphas_batch),
-                        method=diagonalize_method):
-
-                    for start in range(0, len(update_indices),
-                                       n_targets_batch_refit):
-                        batch = slice(start, start + n_targets_batch_refit)
-
-                        weights = backend.matmul(
-                            matrix,
-                            backend.to_gpu(Y[:, update_indices[batch]],
-                                           device=device))
-                        # used_n_alphas_batch, n_samples, n_targets_batch = \
-                        # weights.shape
-
-                        # select alphas corresponding to best cv_score
-                        alphas_indices = backend.searchsorted(
-                            used_alphas, best_alphas[mask][batch])
-                        # mask targets whose selected alphas are outside the
-                        # alpha batch
-                        mask2 = backend.isin(
-                            alphas_indices,
-                            backend.arange(len(used_alphas))[alpha_batch])
-                        # get indices in alpha_batch
-                        alphas_indices = backend.searchsorted(
-                            backend.arange(len(used_alphas))[alpha_batch],
-                            alphas_indices[mask2])
-                        # update corresponding weights
-                        mask_target = backend.arange(weights.shape[2])
-                        mask_target = backend.to_gpu(mask_target)[mask2]
-                        tmp = weights[alphas_indices, :, mask_target]
-                        dual_weights[:, batch][:, backend.to_cpu(mask2)] = \
-                            backend.to_cpu(tmp).T
-                        del weights, alphas_indices, mask2, mask_target
-                    del matrix
+                dual_weights = _refit_dual_weights(
+                    K, Y, update_indices, best_alphas[mask],
+                    n_targets_batch=n_targets_batch_refit,
+                    method=diagonalize_method, device=device)
 
                 if return_weights == 'primal':
                     # multiply by g and not np.sqrt(g), as we then want to use
@@ -576,10 +547,11 @@ def _decompose_kernel_ridge(Ktrain, alphas, Ktest=None, n_alphas_batch=None,
                 raise ValueError("Unknown negative_eigenvalues=%r." %
                                  (negative_eigenvalues, ))
 
-        if Ktest is not None:
-            matrices = backend.matmul(Ktest_V, ev_weighting[:, :, None] * U.T)
-        else:
-            matrices = backend.matmul(Vt.T, ev_weighting[:, :, None] * U.T)
+        # Compute (left * ev_weighting) @ U.T rather than
+        # left @ (ev_weighting * U.T), to scale the smallest of the two arrays.
+        left = Ktest_V if Ktest is not None else Vt.T
+        matrices = backend.matmul(left[None] * ev_weighting[:, None, :], U.T)
+        del left
 
         if use_alpha_batch:
             yield matrices, batch
@@ -587,6 +559,73 @@ def _decompose_kernel_ridge(Ktrain, alphas, Ktest=None, n_alphas_batch=None,
             return matrices, batch
 
         del matrices
+
+
+def _refit_dual_weights(K, Y, target_indices, alphas, n_targets_batch=None,
+                        method="eigh", device=None):
+    """Solve kernel ridge for a subset of targets, with one alpha per target.
+
+    Computes ``(K + alphas[t] * Id)^-1 @ Y[:, target_indices[t]]`` for each
+    target ``t``. The kernel is diagonalized only once, and each target is
+    solved in the eigenbasis with its own regularization, so the cost does not
+    depend on the number of different alphas.
+
+    Parameters
+    ----------
+    K : array of shape (n_samples, n_samples)
+        Training kernel.
+    Y : array of shape (n_samples, n_targets)
+        Target data.
+    target_indices : array of shape (n_selected_targets, )
+        Indices of the targets to solve.
+    alphas : array of shape (n_selected_targets, )
+        Regularization parameter of each selected target.
+    n_targets_batch : int or None
+        Size of the batch for over targets. Used for memory reasons.
+        If None, uses all selected targets at once.
+    method : str in {"eigh", "svd"}
+        Method used to diagonalize the kernel.
+    device : str or None
+        Device used for the computations.
+
+    Returns
+    -------
+    dual_weights : array of shape (n_samples, n_selected_targets)
+        Kernel ridge coefficients. Always stored on CPU memory.
+    """
+    backend = get_backend()
+
+    n_selected = len(target_indices)
+    if n_targets_batch is None:
+        n_targets_batch = n_selected
+
+    if method == "eigh":
+        # diagonalization: K = V @ np.diag(eigenvalues) @ V.T
+        eigenvalues, V = backend.eigh(K)
+        # match SVD notations: K = U @ np.diag(eigenvalues) @ Vt
+        U = V
+        Vt = V.T
+    elif method == "svd":
+        # SVD: K = U @ np.diag(eigenvalues) @ Vt
+        U, eigenvalues, Vt = backend.svd(K)
+    else:
+        raise ValueError("Unknown method=%r." % (method, ))
+
+    dual_weights = backend.zeros_like(K, shape=(K.shape[0], n_selected),
+                                      device="cpu")
+    for start in range(0, n_selected, n_targets_batch):
+        batch = slice(start, start + n_targets_batch)
+        Y_batch = backend.to_gpu(Y[:, target_indices[batch]], device=device)
+
+        # (K + alpha * Id)^-1 @ Y = Vt.T @ ((U.T @ Y) / (eigenvalues + alpha))
+        weights = backend.matmul(U.T, Y_batch)
+        weights /= eigenvalues[:, None] + alphas[batch][None, :]
+        weights = backend.matmul(Vt.T, weights)
+
+        dual_weights[:, batch] = backend.to_cpu(weights)
+        del Y_batch, weights
+
+    return dual_weights
 
 
 def solve_kernel_ridge_cv_eigenvalues(

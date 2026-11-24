@@ -10,6 +10,8 @@ from himalaya.utils import assert_array_almost_equal
 from himalaya.scoring import r2_score
 
 from himalaya.ridge import solve_group_ridge_random_search
+from himalaya.ridge._random_search import _decompose_ridge
+from himalaya.ridge._random_search import _refit_primal_weights
 
 GPU_BACKENDS = [
     "cupy",
@@ -150,3 +152,49 @@ def test_solve_group_ridge_random_search_Y_in_cpu(backend):
 
     # Results should be on CPU (since Y_in_cpu=True)
     assert not backend.is_in_gpu(cv_scores)
+
+
+@pytest.mark.parametrize('n_targets_batch', [None, 2])
+@pytest.mark.parametrize('backend', ALL_BACKENDS)
+def test_refit_primal_weights(backend, n_targets_batch):
+    # The refit solves each target with its own alpha, and should match a
+    # direct linear solve.
+    backend = set_backend(backend)
+    Xs, Y, _ = _create_dataset(backend)
+    X = backend.concatenate(Xs, 1)
+    target_indices = backend.asarray(np.array([3, 0, 2]))
+    alphas = backend.asarray_like(np.array([1e-1, 1e1, 1e3]), ref=X)
+
+    primal_weights = _refit_primal_weights(
+        X, Y, target_indices, alphas, n_targets_batch=n_targets_batch,
+        device=getattr(X, "device", None))
+    assert primal_weights.shape == (X.shape[1], len(target_indices))
+
+    X_np, Y_np = backend.to_numpy(X), backend.to_numpy(Y)
+    for ii, (tt, alpha) in enumerate(
+            zip(backend.to_numpy(target_indices), backend.to_numpy(alphas))):
+        reference = np.linalg.solve(
+            X_np.T @ X_np + alpha * np.eye(X_np.shape[1]),
+            X_np.T @ Y_np[:, tt])
+        assert_array_almost_equal(primal_weights[:, ii], reference, decimal=5)
+
+
+@pytest.mark.parametrize('n_alphas_batch', [5, 2])
+@pytest.mark.parametrize('backend', ALL_BACKENDS)
+def test_decompose_ridge_Xtest(backend, n_alphas_batch):
+    # Giving Xtest should be equivalent to multiplying the matrices by Xtest.
+    backend = set_backend(backend)
+    Xs, _, _ = _create_dataset(backend)
+    X = backend.concatenate(Xs, 1)
+    Xtrain, Xtest = X[:60], X[60:]
+    alphas = backend.asarray_like(np.logspace(-2, 2, 5), ref=X)
+
+    results = _decompose_ridge(Xtrain, alphas, n_alphas_batch=n_alphas_batch)
+    results_test = _decompose_ridge(Xtrain, alphas, Xtest=Xtest,
+                                    n_alphas_batch=n_alphas_batch)
+
+    for (matrices, _), (matrices_test, batch) in zip(results, results_test):
+        assert matrices_test.shape == (len(alphas[batch]), Xtest.shape[0],
+                                       Xtrain.shape[0])
+        assert_array_almost_equal(matrices_test,
+                                  backend.matmul(Xtest, matrices))

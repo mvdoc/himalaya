@@ -11,6 +11,7 @@ from himalaya.utils import assert_array_almost_equal
 from himalaya.scoring import r2_score
 
 from himalaya.kernel_ridge import solve_multiple_kernel_ridge_random_search
+from himalaya.kernel_ridge._random_search import _refit_dual_weights
 
 
 def _create_dataset(backend, n_targets=4):
@@ -197,3 +198,29 @@ def test_solve_multiple_kernel_ridge_random_search_global_alpha(
     # test that we return a single alpha
     best_alphas = backend.to_numpy(best_alphas)
     assert np.allclose(best_alphas[0], best_alphas)
+
+
+@pytest.mark.parametrize('n_targets_batch', [None, 3])
+@pytest.mark.parametrize('diagonalize_method', ['eigh', 'svd'])
+@pytest.mark.parametrize('backend', ALL_BACKENDS)
+def test_refit_dual_weights(backend, diagonalize_method, n_targets_batch):
+    # The refit solves each target with its own alpha, and should match a
+    # direct linear solve.
+    backend = set_backend(backend)
+    Ks, Y, gammas, _ = _create_dataset(backend, n_targets=7)
+    K = (gammas[0][:, None, None] * Ks).sum(0)
+    target_indices = backend.asarray(np.array([5, 0, 3, 6, 1]))
+    alphas = backend.asarray_like(
+        np.array([1e-1, 1e1, 1e3, 1e-1, 1e1]), ref=K)
+
+    dual_weights = _refit_dual_weights(
+        K, Y, target_indices, alphas, n_targets_batch=n_targets_batch,
+        method=diagonalize_method, device=getattr(K, "device", None))
+    assert dual_weights.shape == (K.shape[0], len(target_indices))
+
+    K_np, Y_np = backend.to_numpy(K), backend.to_numpy(Y)
+    for ii, (tt, alpha) in enumerate(
+            zip(backend.to_numpy(target_indices), backend.to_numpy(alphas))):
+        reference = scipy.linalg.solve(K_np + alpha * np.eye(K_np.shape[0]),
+                                       Y_np[:, tt])
+        assert_array_almost_equal(dual_weights[:, ii], reference, decimal=5)
