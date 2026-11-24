@@ -11,7 +11,7 @@ Usage
 -----
     python benchmarks/profile_random_search_gpu.py \
         --n_samples 3000 --n_targets 80000 --n_kernels 4 --n_iter 10 \
-        --n_targets_batch 20000
+        --n_targets_batch 40000
 
 Add ``--Y_in_cpu`` to keep the targets on CPU as with large datasets; the
 breakdown then shows the time spent copying them to the GPU ("to_gpu").
@@ -323,9 +323,10 @@ def main():
     parser.add_argument("--n_samples", type=int, default=3000)
     parser.add_argument("--n_targets", type=int, default=80000)
     parser.add_argument("--n_kernels", type=int, default=4)
-    parser.add_argument("--n_alphas", type=int, default=25)
+    parser.add_argument("--n_alphas", type=int, default=20)
     parser.add_argument("--n_iter", type=int, default=10)
-    parser.add_argument("--cv", type=int, default=5)
+    parser.add_argument("--cv", type=int, default=10,
+                        help="number of folds (e.g. the number of runs)")
     parser.add_argument("--n_targets_batch", type=int, default=None)
     parser.add_argument("--n_alphas_batch", type=int, default=None)
     parser.add_argument("--float64", action="store_true")
@@ -350,7 +351,7 @@ def main():
     Ks, Y = make_data(args.n_samples, args.n_targets, args.n_kernels, dtype)
     Ks, Y = backend.asarray(Ks), backend.asarray(Y)
     device = Ks.device
-    alphas = backend.asarray_like(np.logspace(-2, 8, args.n_alphas), ref=Ks)
+    alphas = backend.asarray_like(np.logspace(1, 20, args.n_alphas), ref=Ks)
 
     # one cross-validation split, and one batch of targets
     n_test = args.n_samples // args.cv
